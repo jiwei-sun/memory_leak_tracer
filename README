@@ -1,0 +1,153 @@
+1 Function
+The tool is for debugging the memory leak issue of C program on Linux
+system, and it supports tracing the memory allocated by malloc(),
+calloc(), realloc(), and mmap().
+
+Although there are many famous tools for debugging memory leak issue,
+such as Valgrind, mtrace and so on, and there are many good tools on
+github too, many of the above tools give us the results when the task
+exits. And there are many omitted and error information. For example,
+(1) Memory pool, many programs will allocate a big memory pool, but it
+was not freed when the task exits, the case will cause a error information.
+(2) When allocated memory is used for a period of time, and then it is
+no longer used and it is not freed until the task exits. If there are
+many similar cases, we need to focus on them. And the above tools hard
+to use to debug the case.
+
+The process of memory allocating and freeing is very important for
+debugging memory leak issues, especially for some complex project. I have
+experienced such a problem, but I failed to find the root cause with Valgrind.
+
+The tool can monitor the memory allocating and freeing from beginning
+to end of a task, and output the related information to a log file at
+intervals. And we can get some useful information from those logs, such
+as call trace, allocated memory size and address, time stamp, and son on.
+We can judge there are some memory leak or not based on that information.
+
+2 How To Use
+You don't need to modify any source code, it's better that add a "-g"
+when you compile your source codes, and add a "-rdynamic" when you link
+your program, otherwise the call trace in the logs is just address not
+the symbol. Please note that if you need to run the tool on the following
+ARCH, please rebuild you program with extra parameters,
+For ARM32 arch:
+"-fno-omit-frame-pointer -mapcs -mno-sched-prolog -funwind-tables "
+For ARM64 arch:
+"-fno-omit-frame-pointer -funwind-tables "
+For MIPS32 or MIPS64 arch:
+" -funwind-tables "
+
+You just need to build the tool by using the following command,
+$ cd src/
+$ make CC=$TOOLCHAIN ARCH=$arch
+and the TOOLCHAIN is your toolchain, for example,
+"powerpc-wrs-linux-gcc",
+gcc by default.
+if you need to debug arm32, arm64, mips app, please add ARCH=$arch, and $arch is arm32, or
+arm64, or mips.
+and then run the following command to monitor your program, such as ./test/test_calloc.elf
+
+$ LD_PRELOAD=./src/libmem_leak_tracer.so MEM_LEAK_LOOP_TIME=1800 ./test/test_calloc.elf
+
+and the MEM_LEAK_LOOP_TIME is the interval in seconds, 1 hour by default.
+And in the foregoing example, the logs will be recorded every half an
+hour. And the logs are in /tmp/memory_debug/, and their names are as
+following,
+$(pid).all.$(timestamp).log
+$(pid).doubtful.$(timestamp).log
+$(pid)_total.doubtful.log
+$(pid)_total.log
+
+The "pid" is the monitoring task's pid, and the "timestamp" is the
+timestamp when output the log.
+
+By the way, the tool supports multithread, and it is thread-safe.
+
+3 How To Check The Logs
+There are four types logs,
+$(pid).all.$(timestamp)
+$(pid).doubtful.$(timestamp)
+$(pid)_total.log
+$(pid)_total.doubtful.log
+and $(pid).all.$(timestamp) is a file which records the call trace of
+all alloced memory which has not been freed at $(timestamp).
+the "$(pid)_total.log" records the call trace of all allocated memory
+which has not been freed when task exited.
+the "$(pid).doubtful.$(timestamp)" records the same call trace of
+allocated memory which has not been freed at $(timestamp), the type of
+call trace is doubtful.
+the "$(pid)_total.doubtful.log" records the same call trace of allocated
+memory which has not been freed at $(timestamp), the type of call trace
+is doubtful.
+
+For example, we did a test with test/test_realloc_leak.c
+(1)build the tool
+$ cd memory_leak_tracer/src/
+$ make clean;make
+(2)build test code
+$ cd ../test/
+$ make clean;make
+(3)test
+$ LD_PRELOAD=src/libmem_leak_tracer.so MEM_LEAK_LOOP_TIME=1 test/test_realloc_leak.elf
+(4) analyze logs
+$ cd /tmp/memory_debug/
+$ ls
+There are many logs, generally, there are four types logs, for example,
+5602.all.1564296113.log，5602.doubtful.1564296119.log，
+5602_total.doubtful.log，5602_total.log
+*total*.log are just created when task exited
+5602_total.log records the memory allocated call trace which has not
+been freed before task exited, and they may (or not) be the leaked memory.
+For example,
+
+ realloc addr 0x25fe830, len 400, time_stamp:1564296145
+src/libmem_leak_tracer.so(mem_leak_backtrace+0x20)[0x7fedde10b11d]
+src/libmem_leak_tracer.so(realloc+0x1db)[0x7fedde10cc19]
+test/test_realloc_leak.elf[0x400647]
+/lib/x86_64-linux-gnu/libc.so.6(__libc_start_main+0xf5)[0x7fedddd62f45]
+test/test_realloc_leak.elf[0x400549]
+
+" realloc addr 0x25fe830, len 400, time_stamp:1564296145"
+it show us the memory is allocated by realloc(), and the length is 400 byptes,
+and the timestamp of alloced is 1564296145s，
+Then the following contents are call trace.
+
+5602_total.doubtful.log records the same call trace alloced memory,
+For example,
+
+Call Trace counter: 4
+src/libmem_leak_tracer.so(mem_leak_backtrace+0x20)[0x7fedde10b11d]
+src/libmem_leak_tracer.so(realloc+0x1db)[0x7fedde10cc19]
+test/test_realloc_leak.elf[0x400647]
+/lib/x86_64-linux-gnu/libc.so.6(__libc_start_main+0xf5)[0x7fedddd62f45]
+test/test_realloc_leak.elf[0x400549]
+
+"Call Trace counter: 4" tells us the call trace allocated 4 times, and the
+following is call trace
+
+4 How to test the tool
+$ LD_PRELOAD=libmem_leak_tracer.so MEM_LEAK_LOOP_TIME=2 test_realloc_leak.elf
+
+5 Attentions
+5.1 The tool supports X86_64 by default, if you want to build it for else
+arch APP, please modify the app_arch.h, and need to redefine the related
+macro according to comments. For example, if you want to build a tool
+which is used to debug a PPC32 APP which can run in PPC32 ARCH, pleae modify
+#define X86_64
+to
+#define PPC32
+
+5.2 The tools was tested on glibc, and for X86_64, ARM32, ARM64, MIP32, MIPS64,
+PPC32, PPC64, it can work.
+
+5.3 The tool uses backtrace() to get the call trace, so it depends
+glibc 2.1 or newer version. If you want to support other version glibc
+or other libc, you need to rewrite the following two function according
+to different ARCH and ABI.
+
+extern void mem_leak_backtrace_symbols_fd(void *const *buffer, int size, int fd);
+extern int mem_leak_backtrace(void **buffer, int size);
+
+5.4 The tool can not run on uclibc so far.
+
+6 To Do List

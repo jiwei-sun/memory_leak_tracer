@@ -1,0 +1,228 @@
+1 功能
+这个工具用于调试Linux系统上C程序的内存泄露问题,目前支持malloc()，calloc()，
+realloc(),mmap()所申请的内存.
+
+虽然已经有很多非常优秀的调试内存泄露的工具，比如Valgrind，gcc自带的mtrace.
+并且github上也有很多很好的调试工具，但是上面提到的这些工具的调试思路都一
+般是在进程结束时将没有free的内存的情况输出出来，以便调试.有时候这么做会
+误报，漏报，比如下面的情况
+（1） 内存池，进程在运行开始时申请了一个大内存池，但是结束的时候并没有
+free它，这时候这个会误报
+（2） 进程申请了内存使用一段时间后不再使用，但是也没有及时free，只在进
+程退出时free，这种情况也属于内存泄露，这样的情况很容易漏报.如果这样情况
+只发生一次,并且内存也不大，这也无关紧要，如果发生很多次，总的内存也很大，
+这样的情况就必须要关注，上面提到的那些工具很难用于调试这样的问题.
+
+调试内存泄露的问题，我们关注进程运行过程中申请释放的过程是很重要的，特别
+是对于程序的源码非常复杂的情况,而这样的代码中的内存泄露问题往往非常的隐
+晦，只靠在进程结束时再汇总结果往往不能满足我们的需求.
+
+这个工具可以监控并记录从进程开始到结束的整个过程的内存分配情况，
+并每隔一段时间将记录的内存的分配情况输出到log中，这样我们可以对比不同时
+间log，获取内存的增删情况以及申请内存的调用栈，从而有助于我们分析是否发
+生了内存泄露，并快速定位到相应的代码.
+
+
+2 如何使用
+这个工具不需要对待调试的代码做任何修改，为了log记录的调用栈的符号能够显
+示的更直观,请在编译代码时加入调试选项"-g", 链接时加入"-rdynamic",否则只
+是符号的地址. 请额外注意,如果需要调试ARM32,ARM64,MIPS的程序时,需要在编译
+你的程序时需要添加额外的参数,
+For ARM32 arch:
+"-fno-omit-frame-pointer -mapcs -mno-sched-prolog -funwind-tables "
+For ARM64 arch:
+"-fno-omit-frame-pointer -funwind-tables "
+For MIPS32 or MIPS64 arch:
+" -funwind-tables "
+可以参考test中Makefile的内容
+
+用你的工具链编译工具
+$ cd src/
+$ make CC=$TOOLCHAIN ARCH=$arch
+这里的"TOOLCHAIN"是你的工具链,例如,可以设置为"powerpc-wrs-linux-gcc",
+如果不设置,默认是gcc.
+如果需要编译ARM32, ARM64, MIPS的工具, 请追加ARCH=$arch这个参数,其中
+arch=arm32, arm64, 或者mips.
+
+将这个工具用对应的编译链编译后，在你的环境中运行类似下面的命令就可以了.
+
+$ LD_PRELOAD=./src/libmem_leak_tracer.so MEM_LEAK_LOOP_TIME=1800 ./test/test_calloc.elf
+
+其中MEM_LEAK_LOOP_TIME是两次log输出的间隔时间,单位是S, 默认是一个1个小时.
+上面的例子中，每隔半小时在/tmp/memory_debug/输出一次log, log的命名是以要
+监控的进程的pid开头的, 例如
+$(pid).all.$(timestamp).log
+$(pid).doubtful.$(timestamp).log
+$(pid)_total.doubtful.log
+$(pid)_total.log
+这里的pid是要监控的进程的pid,timestamp是输出log时的时间戳.
+
+这个工具支持多线程,并且是线程安全的.
+
+3 如何检查log，并根据log分析有肯能的泄露点
+这个工具总共输出三种类型的log，命名分别如下
+$(pid).all.$(timestamp).log
+$(pid).doubtful.$(timestamp).log
+$(pid)_total.doubtful.log
+$(pid)_total.log
+其中$pid.all.$timestamp记录的是该timestamp所有的还没有释放的内存的调用栈,
+根据对比两次timestamp记录的log文件，我们可以知道这段时间内的内存的申请和
+释放情况，根据其中的调用栈，我们可以快速找到每一个内存分配的上下文，然后
+综合分析是否发生了内存泄露.
+$pid.doubtful.$timestamp记录的是从进程运行开始到该timestamp所有可疑的分
+配内存的调用栈，如果相同调用栈的次数大于1次，这说明很有可能发生了内存泄
+露, 需要重点排查。
+$pid_total.log记录的是进程结束了还没有free的内存。
+$(pid)_total.doubtful.log中记录了进程结束时所有在相同调用栈下申请的永远
+不释放的内存，这个log记录的信息很有可能是内存泄漏的点，也需要额外注意。
+
+这里以test/test_realloc_leak.c举例说明
+(1)编译这个工具
+$ cd memory_leak_tracer/src/
+$ make clean;make
+(2)编译测试代码
+$ cd ../test/
+$ make clean;make
+(3)测试
+$ LD_PRELOAD=src/libmem_leak_tracer.so MEM_LEAK_LOOP_TIME=1 test/test_realloc_leak.elf
+(4)分析log
+$ cd /tmp/memory_debug/
+$ ls
+会有很多log
+这些log可以分为四种类型，5602.all.1564296113.log，5602.doubtful.1564296119.log，
+5602_total.doubtful.log，5602_total.log
+*total*.log只有在进程结束时才会产生.
+5602_total.log中记录了进程结束时没有释放的内存，
+这部分内存可能是泄漏的内存也可能不是，在这个例子中，记录的内容全部是泄漏的，日志的内容如下
+ realloc addr 0x25fbbf0, len 400, time_stamp:1564296109
+src/libmem_leak_tracer.so(mem_leak_backtrace+0x20)[0x7fedde10b11d]
+src/libmem_leak_tracer.so(realloc+0x1db)[0x7fedde10cc19]
+test/test_realloc_leak.elf[0x400647]
+/lib/x86_64-linux-gnu/libc.so.6(__libc_start_main+0xf5)[0x7fedddd62f45]
+test/test_realloc_leak.elf[0x400549]
+
+
+ realloc addr 0x25fcf40, len 1200, time_stamp:1564296115
+src/libmem_leak_tracer.so(mem_leak_backtrace+0x20)[0x7fedde10b11d]
+src/libmem_leak_tracer.so(realloc+0x1db)[0x7fedde10cc19]
+test/test_realloc_leak.elf[0x4006b7]
+/lib/x86_64-linux-gnu/libc.so.6(__libc_start_main+0xf5)[0x7fedddd62f45]
+test/test_realloc_leak.elf[0x400549]
+
+
+ realloc addr 0x25fc540, len 400, time_stamp:1564296121
+src/libmem_leak_tracer.so(mem_leak_backtrace+0x20)[0x7fedde10b11d]
+src/libmem_leak_tracer.so(realloc+0x1db)[0x7fedde10cc19]
+test/test_realloc_leak.elf[0x400647]
+/lib/x86_64-linux-gnu/libc.so.6(__libc_start_main+0xf5)[0x7fedddd62f45]
+test/test_realloc_leak.elf[0x400549]
+
+
+ realloc addr 0x25fe360, len 1200, time_stamp:1564296127
+src/libmem_leak_tracer.so(mem_leak_backtrace+0x20)[0x7fedde10b11d]
+src/libmem_leak_tracer.so(realloc+0x1db)[0x7fedde10cc19]
+test/test_realloc_leak.elf[0x4006b7]
+/lib/x86_64-linux-gnu/libc.so.6(__libc_start_main+0xf5)[0x7fedddd62f45]
+test/test_realloc_leak.elf[0x400549]
+
+
+ realloc addr 0x25fd870, len 400, time_stamp:1564296133
+src/libmem_leak_tracer.so(mem_leak_backtrace+0x20)[0x7fedde10b11d]
+src/libmem_leak_tracer.so(realloc+0x1db)[0x7fedde10cc19]
+test/test_realloc_leak.elf[0x400647]
+/lib/x86_64-linux-gnu/libc.so.6(__libc_start_main+0xf5)[0x7fedddd62f45]
+test/test_realloc_leak.elf[0x400549]
+
+
+ realloc addr 0x25ff0f0, len 1200, time_stamp:1564296139
+src/libmem_leak_tracer.so(mem_leak_backtrace+0x20)[0x7fedde10b11d]
+src/libmem_leak_tracer.so(realloc+0x1db)[0x7fedde10cc19]
+test/test_realloc_leak.elf[0x4006b7]
+/lib/x86_64-linux-gnu/libc.so.6(__libc_start_main+0xf5)[0x7fedddd62f45]
+test/test_realloc_leak.elf[0x400549]
+
+
+ realloc addr 0x25fe830, len 400, time_stamp:1564296145
+src/libmem_leak_tracer.so(mem_leak_backtrace+0x20)[0x7fedde10b11d]
+src/libmem_leak_tracer.so(realloc+0x1db)[0x7fedde10cc19]
+test/test_realloc_leak.elf[0x400647]
+/lib/x86_64-linux-gnu/libc.so.6(__libc_start_main+0xf5)[0x7fedddd62f45]
+test/test_realloc_leak.elf[0x400549]
+
+
+ realloc addr 0x25ffe80, len 1200, time_stamp:1564296151
+src/libmem_leak_tracer.so(mem_leak_backtrace+0x20)[0x7fedde10b11d]
+src/libmem_leak_tracer.so(realloc+0x1db)[0x7fedde10cc19]
+test/test_realloc_leak.elf[0x4006b7]
+/lib/x86_64-linux-gnu/libc.so.6(__libc_start_main+0xf5)[0x7fedddd62f45]
+test/test_realloc_leak.elf[0x400549]
+
+代码中有四次循环，每一次循环泄漏两个，一个是400 bytes，一个是1200 bytes，
+所以是8个泄漏点，在log中全部记录下来了.
+具体来看看log中每一次记录的内容，
+ realloc addr 0x25fe830, len 400, time_stamp:1564296145
+src/libmem_leak_tracer.so(mem_leak_backtrace+0x20)[0x7fedde10b11d]
+src/libmem_leak_tracer.so(realloc+0x1db)[0x7fedde10cc19]
+test/test_realloc_leak.elf[0x400647]
+/lib/x86_64-linux-gnu/libc.so.6(__libc_start_main+0xf5)[0x7fedddd62f45]
+test/test_realloc_leak.elf[0x400549]
+第一行
+" realloc addr 0x25fe830, len 400, time_stamp:1564296145"
+表明是通过realloc()函数分配的内存，长度是400 bytes，内存申请的时间是
+1564296145s，
+从第二行开始是申请的调用栈.
+
+
+5602_total.doubtful.log记录了在同一个调用栈下申请的内存次数大于两次的情况，
+例如
+Call Trace counter: 4
+src/libmem_leak_tracer.so(mem_leak_backtrace+0x20)[0x7fedde10b11d]
+src/libmem_leak_tracer.so(realloc+0x1db)[0x7fedde10cc19]
+test/test_realloc_leak.elf[0x4006b7]
+/lib/x86_64-linux-gnu/libc.so.6(__libc_start_main+0xf5)[0x7fedddd62f45]
+test/test_realloc_leak.elf[0x400549]
+
+
+Call Trace counter: 4
+src/libmem_leak_tracer.so(mem_leak_backtrace+0x20)[0x7fedde10b11d]
+src/libmem_leak_tracer.so(realloc+0x1db)[0x7fedde10cc19]
+test/test_realloc_leak.elf[0x400647]
+/lib/x86_64-linux-gnu/libc.so.6(__libc_start_main+0xf5)[0x7fedddd62f45]
+test/test_realloc_leak.elf[0x400549]
+
+其中
+Call Trace counter: 4
+src/libmem_leak_tracer.so(mem_leak_backtrace+0x20)[0x7fedde10b11d]
+src/libmem_leak_tracer.so(realloc+0x1db)[0x7fedde10cc19]
+test/test_realloc_leak.elf[0x400647]
+/lib/x86_64-linux-gnu/libc.so.6(__libc_start_main+0xf5)[0x7fedddd62f45]
+test/test_realloc_leak.elf[0x400549]
+第一行"Call Trace counter: 4"这个调用栈申请了4次内存，
+后面的是调用栈.
+
+而*.all.*.log和*.doubtful.*.log中的内容是在log记录时统计的还没有释放的
+所有内存的情况，通过对比前后两个时间戳的log，我们很容易发现是不是在那个
+调用栈中发生了内存泄漏.
+
+4 如何测试这个工具
+$ LD_PRELOAD=libmem_leak_tracer.so MEM_LEAK_LOOP_TIME=2 test_realloc_leak.elf
+
+5 注意事项
+5.1 默认情况下该工具支持X86_64，如果你要用于调试其他架构的程序请修改
+app_arch.h, 根据注释重新定义相应的宏, 例如在PPC32上调试,我们需要将
+#define X86_64
+改为
+#define PPC32
+
+5.2 目前该工具由于使用backtrace函数回溯函数的调用栈，其依赖于glibc 2.1以
+上版本，其他libc暂时不支持,如果你要移植到其他版本或者libc，请根据目标CPU
+的架构和APP,结合函数栈帧回溯原则重新编写这两个函数
+extern void mem_leak_backtrace_symbols_fd(void *const *buffer, int size, int fd);
+extern int mem_leak_backtrace(void **buffer, int size);
+
+5.3 目前这个工具在X86 64bit, ARM32, ARM64, MIPS32, MIPS64, PPC32, PPC64
+上可以正常使用.
+
+5.4 目前这个工具还不能运行在uclibc上
+
+6 待做事项
